@@ -241,7 +241,20 @@ revoke all on function public.package_scores() from public;
 revoke all on function public.package_scores_for(text, integer) from public;
 revoke all on function public.purge_raw_events(integer) from public;
 
-grant execute on function public.challenge() to anon, authenticated;
-grant execute on function public."record"(text, text, text, bigint) to anon, authenticated;
-grant execute on function public.package_scores() to anon, authenticated;
-grant execute on function public.package_scores_for(text, integer) to anon, authenticated;
+-- Supabase always has these roles; anywhere else the grants are skipped so the
+-- migrations stay runnable against a plain PostgreSQL for testing.
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        grant execute on function public.challenge() to anon;
+        grant execute on function public."record"(text, text, text, bigint) to anon;
+        grant execute on function public.package_scores() to anon;
+        grant execute on function public.package_scores_for(text, integer) to anon;
+    end if;
+    if exists (select 1 from pg_roles where rolname = 'authenticated') then
+        grant execute on function public.challenge() to authenticated;
+        grant execute on function public."record"(text, text, text, bigint) to authenticated;
+        grant execute on function public.package_scores() to authenticated;
+        grant execute on function public.package_scores_for(text, integer) to authenticated;
+    end if;
+end $$;
