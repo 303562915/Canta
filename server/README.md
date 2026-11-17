@@ -69,3 +69,28 @@ survived >= 50% 且上面 <= 2%   -> SAFE
 - 只存 brand / ROM 家族 / ROM 主版本 / SDK，不存机型、build 号、指纹、安装 ID；
 - 原始事件按 `purge_raw_events()` 过期丢弃，只留聚合；
 - 表上开了 RLS 且没有任何 policy：只有 RPC 能被 anon 调，直接读表拿不到东西。
+
+## 部署到你自己的 Supabase（一步）
+
+1. 控制台 → **SQL 编辑器** → 粘贴执行 [apply-all.sql](supabase/apply-all.sql)（等价于依次跑两个迁移文件）；
+2. 建一个定时任务清理原始事件（35 天），例如 pg_cron：
+
+```sql
+select cron.schedule('purge-telemetry', '30 3 * * *', $$select public.purge_raw_events()$$);
+```
+
+3. App 端已默认指向本项目：`TelemetryEndpoints.BASE_URL = https://axuhfogeovtsbxokqccf.supabase.co/rest/v1/rpc/`、
+   `API_KEY = sb_publishable_YipHHrFaw1E2q5qTUVPl0A_plD7Q5yS`（可用 `-Pcanta.telemetry.baseUrl/.apiKey` 覆盖）。
+
+执行完可以自测（在能连上 supabase.co 的机器上）：
+
+```bash
+KEY=sb_publishable_YipHHrFaw1E2q5qTUVPl0A_plD7Q5yS
+curl -s -H "apikey: $KEY" -H "Content-Type: application/json" -d '{}' \
+  https://axuhfogeovtsbxokqccf.supabase.co/rest/v1/rpc/package_scores
+# 无数据时返回 []；表没建好时返回 500/PostgREST error，一眼能看出来
+```
+
+App 端的自测：打开「分享匿名卸载数据」后卸载一个包、重启、再开 App，
+日志 `Telemetry` 会打 `Sent N telemetry events`；`package_scores` 会多出该包的行，
+`verdict` 初始为 `INSUFFICIENT`，数据攒够后才会变。
