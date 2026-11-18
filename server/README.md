@@ -42,7 +42,7 @@ npm install
 npm test
 ```
 
-`test/protocol.test.mjs` 用 PGlite 起一个真 Postgres，跑完两个迁移后验证：
+`test/protocol.test.mjs` 用 PGlite 起一个真 Postgres，跑完全部迁移后验证：
 
 - 正常批次写入；同一 challenge 重放被拒；
 - 篡改 payload → PoW 校验失败；非法事件类型 → 拒绝；
@@ -72,7 +72,8 @@ survived >= 50% 且上面 <= 2%   -> SAFE
 
 ## 部署到你自己的 Supabase（一步）
 
-1. 控制台 → **SQL 编辑器** → 粘贴执行 [apply-all.sql](supabase/apply-all.sql)（等价于依次跑两个迁移文件）；
+1. 控制台 → **SQL 编辑器** → 粘贴执行 [apply-all.sql](supabase/apply-all.sql)（等价于依次跑
+   `supabase/migrations/*.sql` 全部迁移）；
 2. 建一个定时任务清理原始事件（35 天），例如 pg_cron：
 
 ```sql
