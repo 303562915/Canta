@@ -8,7 +8,7 @@
 -- The shape matches `plans_for` exactly (including `owner_name`), so both read through one parser.
 -- Deleting still goes through `plan_delete`, which needs the identity number *and* its token.
 --
--- Run after 20261119190000_plan_get.sql (or use server/supabase/apply-all.sql).
+-- Run after 20261119220000_device_catalog.sql (or use server/supabase/apply-all.sql).
 
 create or replace function public.plans_by_owner(p_owner text) returns table (
     id bigint, title text, note text, packages text[], votes bigint, comments bigint,
