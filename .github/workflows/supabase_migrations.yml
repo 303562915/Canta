@@ -26,6 +26,8 @@ jobs:
       # Not a secret (it is in the app's API URL). Must be the project the app calls:
       # composeApp/build.gradle.kts embeds https://axuhfogeovtsbxokqccf.supabase.co as the default.
       SUPABASE_PROJECT_ID: axuhfogeovtsbxokqccf
+      # Only needed when linking asks for it; the CLI can do without.
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,9 +38,16 @@ jobs:
           version: latest
 
       - name: Link project
-        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
+        run: |
+          if [ -n "$SUPABASE_DB_PASSWORD" ]; then
+            supabase link --project-ref "$SUPABASE_PROJECT_ID" -p "$SUPABASE_DB_PASSWORD"
+          else
+            supabase link --project-ref "$SUPABASE_PROJECT_ID"
+          fi
         working-directory: server
 
+      # --remote is required: without it the CLI targets a local stack on 127.0.0.1:54322,
+      # which is what made every run of this workflow fail before.
       - name: Apply migrations
-        run: supabase db push
+        run: supabase db push --remote
         working-directory: server
