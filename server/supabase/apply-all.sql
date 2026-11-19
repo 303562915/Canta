@@ -1107,21 +1107,25 @@ select 'plan', c.plan_id::text, c.author, c.author, c.body, c.created_at
  );
 
 /**
- * Verified plans for one device, most liked first — unchanged except that the comment count now
- * comes from the shared table, so a reply is counted like a comment.
+ * Verified plans for one device, most liked first — with the comment count from the shared table so
+ * a reply counts like a comment, and with the name the uploader uses today, which is what the plan
+ * card draws next to its letter avatar.
  */
+drop function if exists public.plans_for(text, text, text, integer, integer);
 create or replace function public.plans_for(
     p_model text, p_codename text, p_rom text, p_rom_version integer, p_limit integer default 50
 ) returns table (
     id bigint, title text, note text, packages text[], votes bigint, comments bigint,
-    created_at timestamptz, rebooted_at timestamptz, owner text, is_test boolean
+    created_at timestamptz, rebooted_at timestamptz, owner text, is_test boolean, owner_name text
 ) language sql stable security definer set search_path = public as $$
     select p.id, p.title, p.note, p.packages,
            (select count(*) from plan_votes v where v.plan_id = p.id)::bigint,
            (select count(*) from community_comments c
              where c.kind = 'plan' and c.target = p.id::text)::bigint,
-           p.created_at, p.rebooted_at, p.owner, p.is_test
+           p.created_at, p.rebooted_at, p.owner, p.is_test,
+           coalesce(nullif(u.name, ''), '') as owner_name
     from plans p
+    left join canta_users u on u.id::text = p.owner
     where p.reboot_verified
       and lower(p.model) = lower(p_model)
       and (p_codename = '' or lower(p.codename) = lower(p_codename))
