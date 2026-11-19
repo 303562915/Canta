@@ -951,9 +951,11 @@ create table if not exists public.community_comments (
     -- The identity number behind that name: what "my comments" and delete are keyed on.
     author_id  text not null default '',
     -- The phone it was written on, as the writer's app reported it: a comment about removing an app
-    -- is only worth as much as the model it is about ("Android 36" alone says nothing).
-    device_model    text not null default '',
-    android_version text not null default '',
+    -- is only worth as much as the model it is about. The system is the ROM line people recognise
+    -- ("HyperOS 2", "One UI 6"); the API level is deliberately not kept, because "36" reads as
+    -- nothing while "HyperOS 2" reads as the build the advice is about.
+    device_model text not null default '',
+    system_name  text not null default '',
     body       text not null,
     created_at timestamptz not null default now()
 );
@@ -1045,11 +1047,11 @@ $$;
  */
 create or replace function public.comments_for(p_kind text, p_target text) returns table (
     id bigint, parent_id bigint, author text, body text, created_at timestamptz, replies bigint,
-    device_model text, android_version text
+    device_model text, system_name text
 ) language sql stable security definer set search_path = public as $$
     select c.id, c.parent_id, c.author, c.body, c.created_at,
            (select count(*) from community_comments r where r.parent_id = c.id)::bigint,
-           c.device_model, c.android_version
+           c.device_model, c.system_name
       from community_comments c
      where c.kind = coalesce(nullif(p_kind, ''), 'plan')
        and c.target = coalesce(p_target, '')
@@ -1068,7 +1070,7 @@ $$;
 create or replace function public.comment_add(
     p_kind text, p_target text, p_body text, p_author text default '',
     p_parent bigint default null, p_author_id text default '',
-    p_model text default '', p_android text default ''
+    p_model text default '', p_system text default ''
 ) returns bigint language plpgsql security definer set search_path = public as $$
 declare
     new_id bigint;
@@ -1094,10 +1096,10 @@ begin
     end if;
 
     insert into community_comments (kind, target, parent_id, author, author_id, body,
-                                   device_model, android_version)
+                                   device_model, system_name)
     values (kind, left(p_target, 200), root_id, left(coalesce(p_author, ''), 60),
             left(coalesce(p_author_id, ''), 60), left(p_body, 1000),
-            left(coalesce(p_model, ''), 80), left(coalesce(p_android, ''), 40))
+            left(coalesce(p_model, ''), 80), left(coalesce(p_system, ''), 60))
     returning id into new_id;
     return new_id;
 end;
