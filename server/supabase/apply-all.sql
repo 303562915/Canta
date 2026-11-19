@@ -915,6 +915,127 @@ begin
     end if;
 end $$;
 
+
+-- ===================================================================
+-- 20261119120000_package_votes.sql
+-- ===================================================================
+
+-- "Can this package be removed?" — a two-sided vote, recorded per package and per device.
+--
+-- A plan like (`plan_vote`) says "this set of removals was ok on this phone". This table is the
+-- other half: every owner can say, for one package, whether *their* phone was fine without it or
+-- not. Both sides are counted, because "12 people removed it and nothing broke" and "3 people
+-- removed it and it bootlooped" are what tells a reader whether to try it.
+--
+-- Votes are stored with the device they were cast on, so the app can show "on your model and ROM
+-- version" and "on all devices" side by side. One vote per (package, voter): a second vote replaces
+-- the first, which is how someone changes their mind.
+--
+-- Run after 20261119110000_device_identity.sql (or use server/supabase/apply-all.sql).
+
+create table if not exists public.package_votes (
+    pkg         text not null,
+    -- The install that voted: its identity number, or a per-install id before it has one.
+    voter       text not null,
+    -- true: the phone was fine without it. false: removing it broke something.
+    can_remove  boolean not null,
+    -- The device the vote was cast on; empty when it was unknown.
+    brand       text not null default '',
+    model       text not null default '',
+    codename    text not null default '',
+    rom         text not null default '',
+    rom_version integer not null default 0,
+    sdk         integer not null default 0,
+    created_at  timestamptz not null default now(),
+    updated_at  timestamptz not null default now(),
+    primary key (pkg, voter)
+);
+
+create index if not exists package_votes_pkg_idx on public.package_votes (pkg);
+create index if not exists package_votes_device_idx on public.package_votes (pkg, model, rom, rom_version);
+
+alter table public.package_votes enable row level security;
+
+/** Counts both sides for [p_pkg], in two scopes: this device, and every device. */
+create or replace function public.package_vote_counts(
+    p_pkg text, p_model text default '', p_codename text default '',
+    p_rom text default '', p_rom_version integer default 0
+) returns jsonb language sql stable security definer set search_path = public as $$
+    with scoped as (
+        select v.can_remove,
+               v.model, v.codename, v.rom, v.rom_version
+        from package_votes v
+        where v.pkg = p_pkg
+    ), device as (
+        select can_remove from scoped
+        where lower(model) = lower(coalesce(p_model, ''))
+          and rom = coalesce(p_rom, '')
+          and rom_version = coalesce(p_rom_version, 0)
+          and (coalesce(p_codename, '') = '' or lower(codename) = lower(p_codename))
+    )
+    select jsonb_build_object(
+        'yes', (select count(*) from device where can_remove),
+        'no', (select count(*) from device where not can_remove),
+        'all_yes', (select count(*) from scoped where can_remove),
+        'all_no', (select count(*) from scoped where not can_remove)
+    )
+$$;
+
+/**
+ * Records what [p_voter] says about [p_pkg] on the device it names, and answers the fresh counts
+ * in the same shape as [package_vote_counts].
+ *
+ * The new vote replaces an earlier one by the same voter, so "I was wrong" is one tap, not a
+ * support ticket. An empty voter is rejected: there has to be something to count once.
+ */
+create or replace function public.package_vote(
+    p_pkg text, p_voter text, p_can_remove boolean,
+    p_brand text default '', p_model text default '', p_codename text default '',
+    p_rom text default '', p_rom_version integer default 0, p_sdk integer default 0
+) returns jsonb language plpgsql security definer set search_path = public as $$
+begin
+    if length(coalesce(p_pkg, '')) = 0 then
+        raise exception 'missing package' using errcode = '22023';
+    end if;
+    if length(coalesce(p_voter, '')) = 0 then
+        raise exception 'missing voter' using errcode = '22023';
+    end if;
+
+    insert into package_votes (pkg, voter, can_remove, brand, model, codename, rom, rom_version, sdk)
+    values (left(p_pkg, 200), left(p_voter, 120), p_can_remove,
+            left(coalesce(p_brand, ''), 60), left(coalesce(p_model, ''), 80),
+            left(coalesce(p_codename, ''), 80), left(coalesce(p_rom, ''), 60),
+            coalesce(p_rom_version, 0), coalesce(p_sdk, 0))
+    on conflict (pkg, voter) do update
+        set can_remove = excluded.can_remove,
+            brand = excluded.brand,
+            model = excluded.model,
+            codename = excluded.codename,
+            rom = excluded.rom,
+            rom_version = excluded.rom_version,
+            sdk = excluded.sdk,
+            updated_at = now();
+
+    return public.package_vote_counts(p_pkg, p_model, p_codename, p_rom, p_rom_version);
+end;
+$$;
+
+revoke all on function public.package_vote_counts(text, text, text, text, integer) from public;
+revoke all on function public.package_vote(text, text, boolean, text, text, text, text, integer, integer) from public;
+
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        grant execute on function public.package_vote_counts(text, text, text, text, integer) to anon;
+        grant execute on function public.package_vote(text, text, boolean, text, text, text, text, integer, integer) to anon;
+    end if;
+    if exists (select 1 from pg_roles where rolname = 'authenticated') then
+        grant execute on function public.package_vote_counts(text, text, text, text, integer) to authenticated;
+        grant execute on function public.package_vote(text, text, boolean, text, text, text, text, integer, integer) to authenticated;
+    end if;
+end $$;
+
+
 -- Comment threads: one table for every comment the community pages show.
 --
 -- Until now comments only existed under a plan (`plan_comments`) and could not be answered, which
@@ -1212,5 +1333,251 @@ begin
         grant execute on function public.comment_delete(bigint, text, text) to authenticated;
         grant execute on function public.comments_by_author(text) to authenticated;
         grant execute on function public.comments_replies_to(text) to authenticated;
+    end if;
+end $$;
+
+
+-- ===================================================================
+-- 20261119140000_comment_identity_and_vote_scope.sql
+-- ===================================================================
+
+-- Comments and votes, second pass: the identity fallback, and a vote scope that answers.
+--
+-- Two things the first pass got wrong for a phone whose number the backend had not handed out yet:
+--
+--   * A comment written before `identity_bind` answered was stored with `author_id` equal to the
+--     install token's head (the client's fallback). `comments_by_author` only matched the number,
+--     so the comment was invisible on "my comments" and `comment_delete` refused it. Both now also
+--     match the token itself, which is the secret that proves the same thing.
+--   * `package_vote_counts` scoped "this phone" on model + ROM + ROM version. When the app could not
+--     read the model yet it sent empty strings, matched nothing, and the bar read 0 votes while
+--     "all devices" had some. An empty model now means "no device scope yet": count everything.
+--
+-- Also adds `package_my_vote`, so the app page can show which side this install already picked
+-- instead of trusting a value it remembered locally.
+--
+-- Run after 20261119130000_comment_threads.sql (or use server/supabase/apply-all.sql).
+
+-- The one-argument versions are replaced by (owner, token): keeping both would make a call with
+-- one argument ambiguous for PostgREST.
+drop function if exists public.comments_by_author(text);
+drop function if exists public.comments_replies_to(text);
+
+/**
+ * What one identity wrote, newest first: the comments it started *and* the replies it left.
+ *
+ * [p_owner] is the identity number; [p_token] is accepted as the same proof, because a comment
+ * written before the number arrived was signed with the token instead. Both are matched, so a
+ * thread does not split in two over when it was written.
+ */
+create or replace function public.comments_by_author(
+    p_owner text, p_token text default ''
+) returns table (
+    id bigint, kind text, target text, title text, body text,
+    created_at timestamptz, replies bigint
+) language sql stable security definer set search_path = public as $$
+    select c.id, c.kind, c.target,
+           coalesce((select left(p.title, 120) from plans p
+                      where c.kind = 'plan' and p.id::text = c.target), '') as title,
+           c.body, c.created_at,
+           (select count(*) from community_comments r where r.parent_id = c.id)::bigint
+      from community_comments c
+     where c.author_id in (
+               coalesce(p_owner, ''),
+               coalesce(p_token, ''),
+               left(coalesce(p_token, ''), 16)
+           )
+        or (c.author_id = ''
+            and (c.author = coalesce(p_owner, '') or c.author = '#' || coalesce(p_owner, '')))
+     order by c.created_at desc
+     limit 200
+$$;
+
+/** The replies other people left under [p_owner]'s comments; [p_token] proves the same identity. */
+create or replace function public.comments_replies_to(
+    p_owner text, p_token text default ''
+) returns table (
+    id bigint, parent_id bigint, kind text, target text, title text,
+    author text, body text, created_at timestamptz, parent_body text
+) language sql stable security definer set search_path = public as $$
+    select r.id, c.id,
+           r.kind, r.target,
+           coalesce((select left(p.title, 120) from plans p
+                      where r.kind = 'plan' and p.id::text = r.target), '') as title,
+           r.author, r.body, r.created_at, c.body
+      from community_comments r
+      join community_comments c on c.id = r.parent_id
+     where (c.author_id in (
+                coalesce(p_owner, ''),
+                coalesce(p_token, ''),
+                left(coalesce(p_token, ''), 16)
+            )
+            or (c.author_id = ''
+                and (c.author = coalesce(p_owner, '') or c.author = '#' || coalesce(p_owner, ''))))
+       and r.author_id <> c.author_id
+       and r.author_id not in (coalesce(p_owner, ''), coalesce(p_token, ''))
+     order by r.created_at desc
+     limit 200
+$$;
+
+/**
+ * Deletes one comment this identity wrote. [p_owner] is the identity number and [p_token] the
+ * secret that proves it, exactly like `plan_delete`: a number alone deletes nothing. The token alone
+ * is enough when the comment was written before the number arrived.
+ */
+create or replace function public.comment_delete(p_id bigint, p_owner text, p_token text) returns boolean
+language plpgsql security definer set search_path = public as $$
+declare
+    removed integer;
+begin
+    if coalesce(p_token, '') = '' then
+        return false;
+    end if;
+    if not exists (select 1 from canta_users u where u.token = p_token) then
+        return false;
+    end if;
+    delete from community_comments c
+     where c.id = p_id
+       and (c.author_id = coalesce(p_owner, '')
+            or c.author_id = p_token
+            or c.author_id = left(p_token, 16)
+            or (c.author_id = '' and (c.author = coalesce(p_owner, '') or c.author = '#' || coalesce(p_owner, ''))));
+    get diagnostics removed = row_count;
+    return removed > 0;
+end;
+$$;
+
+/**
+ * Counts both sides for [p_pkg], in two scopes: this device and every device.
+ *
+ * An empty [p_model] means the caller could not name its phone yet: there is no device scope to
+ * report, so that scope is the whole table rather than a zero that reads like "nobody voted".
+ */
+create or replace function public.package_vote_counts(
+    p_pkg text, p_model text default '', p_codename text default '',
+    p_rom text default '', p_rom_version integer default 0
+) returns jsonb language sql stable security definer set search_path = public as $$
+    with scoped as (
+        select v.can_remove, v.model, v.codename, v.rom, v.rom_version
+        from package_votes v
+        where v.pkg = p_pkg
+    ), device as (
+        select can_remove from scoped
+        where coalesce(p_model, '') = ''
+           or (
+               lower(model) = lower(coalesce(p_model, ''))
+               and rom = coalesce(p_rom, '')
+               and rom_version = coalesce(p_rom_version, 0)
+               and (coalesce(p_codename, '') = '' or lower(codename) = lower(p_codename))
+           )
+    )
+    select jsonb_build_object(
+        'yes', (select count(*) from device where can_remove),
+        'no', (select count(*) from device where not can_remove),
+        'all_yes', (select count(*) from scoped where can_remove),
+        'all_no', (select count(*) from scoped where not can_remove)
+    )
+$$;
+
+/** Which side [p_voter] picked for [p_pkg]: true, false, or null when it never voted. */
+create or replace function public.package_my_vote(p_pkg text, p_voter text) returns boolean
+language sql stable security definer set search_path = public as $$
+    select v.can_remove
+      from package_votes v
+     where v.pkg = p_pkg
+       and v.voter = coalesce(p_voter, '')
+     limit 1
+$$;
+
+revoke all on function public.comments_by_author(text, text) from public;
+revoke all on function public.comments_replies_to(text, text) from public;
+revoke all on function public.comment_delete(bigint, text, text) from public;
+revoke all on function public.package_vote_counts(text, text, text, text, integer) from public;
+revoke all on function public.package_my_vote(text, text) from public;
+
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        grant execute on function public.comments_by_author(text, text) to anon;
+        grant execute on function public.comments_replies_to(text, text) to anon;
+        grant execute on function public.comment_delete(bigint, text, text) to anon;
+        grant execute on function public.package_vote_counts(text, text, text, text, integer) to anon;
+        grant execute on function public.package_my_vote(text, text) to anon;
+    end if;
+    if exists (select 1 from pg_roles where rolname = 'authenticated') then
+        grant execute on function public.comments_by_author(text, text) to authenticated;
+        grant execute on function public.comments_replies_to(text, text) to authenticated;
+        grant execute on function public.comment_delete(bigint, text, text) to authenticated;
+        grant execute on function public.package_vote_counts(text, text, text, text, integer) to authenticated;
+        grant execute on function public.package_my_vote(text, text) to authenticated;
+    end if;
+end $$;
+
+
+-- ===================================================================
+-- 20261119150000_comment_add_variable_fix.sql
+-- ===================================================================
+
+-- Replies never landed: `comment_add` raised "column reference kind is ambiguous".
+--
+-- The function kept the requested kind in a variable called `kind` and then compared
+-- `c.kind = kind` while selecting from the same table. PL/pgSQL resolves an unqualified name
+-- against the query's columns as well as its own variables and refuses to guess, so every call
+-- that carried a parent id — that is, every reply — failed before the insert. A comment on its own
+-- worked, which is why the thread looked like it had no replies and not like it was broken.
+--
+-- The variable is `v_kind` now, and the body declares `#variable_conflict use_variable` so a future
+-- parameter cannot reintroduce the same trap. Everything else is unchanged.
+--
+-- Run after 20261119140000_comment_identity_and_vote_scope.sql (or use server/supabase/apply-all.sql).
+
+create or replace function public.comment_add(
+    p_kind text, p_target text, p_body text, p_author text default '',
+    p_parent bigint default null, p_author_id text default '',
+    p_model text default '', p_system text default ''
+) returns bigint language plpgsql security definer set search_path = public as $$
+#variable_conflict use_variable
+declare
+    new_id bigint;
+    root_id bigint;
+    v_kind text := coalesce(nullif(p_kind, ''), 'plan');
+begin
+    if length(coalesce(p_body, '')) = 0 then
+        raise exception 'empty comment' using errcode = '22023';
+    end if;
+    if length(coalesce(p_target, '')) = 0 then
+        raise exception 'missing target' using errcode = '22023';
+    end if;
+
+    if p_parent is not null then
+        select coalesce(c.parent_id, c.id) into root_id
+          from community_comments c
+         where c.id = p_parent
+           and c.kind = v_kind
+           and c.target = p_target;
+        if root_id is null then
+            raise exception 'parent comment not found' using errcode = '22023';
+        end if;
+    end if;
+
+    insert into community_comments (kind, target, parent_id, author, author_id, body,
+                                   device_model, system_name)
+    values (v_kind, left(p_target, 200), root_id, left(coalesce(p_author, ''), 60),
+            left(coalesce(p_author_id, ''), 60), left(p_body, 1000),
+            left(coalesce(p_model, ''), 80), left(coalesce(p_system, ''), 60))
+    returning id into new_id;
+    return new_id;
+end;
+$$;
+
+revoke all on function public.comment_add(text, text, text, text, bigint, text, text, text) from public;
+
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        grant execute on function public.comment_add(text, text, text, text, bigint, text, text, text) to anon;
+    end if;
+    if exists (select 1 from pg_roles where rolname = 'authenticated') then
+        grant execute on function public.comment_add(text, text, text, text, bigint, text, text, text) to authenticated;
     end if;
 end $$;
