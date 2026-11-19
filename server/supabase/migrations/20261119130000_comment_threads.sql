@@ -33,6 +33,10 @@ create table if not exists public.community_comments (
     author     text not null default '',
     -- The identity number behind that name: what "my comments" and delete are keyed on.
     author_id  text not null default '',
+    -- The phone it was written on, as the writer's app reported it: a comment about removing an app
+    -- is only worth as much as the model it is about ("Android 36" alone says nothing).
+    device_model    text not null default '',
+    android_version text not null default '',
     body       text not null,
     created_at timestamptz not null default now()
 );
@@ -123,10 +127,12 @@ $$;
  * [p_target] is the plan id as text for `kind = 'plan'`, the package name for `kind = 'app'`.
  */
 create or replace function public.comments_for(p_kind text, p_target text) returns table (
-    id bigint, parent_id bigint, author text, body text, created_at timestamptz, replies bigint
+    id bigint, parent_id bigint, author text, body text, created_at timestamptz, replies bigint,
+    device_model text, android_version text
 ) language sql stable security definer set search_path = public as $$
     select c.id, c.parent_id, c.author, c.body, c.created_at,
-           (select count(*) from community_comments r where r.parent_id = c.id)::bigint
+           (select count(*) from community_comments r where r.parent_id = c.id)::bigint,
+           c.device_model, c.android_version
       from community_comments c
      where c.kind = coalesce(nullif(p_kind, ''), 'plan')
        and c.target = coalesce(p_target, '')
@@ -144,7 +150,8 @@ $$;
  */
 create or replace function public.comment_add(
     p_kind text, p_target text, p_body text, p_author text default '',
-    p_parent bigint default null, p_author_id text default ''
+    p_parent bigint default null, p_author_id text default '',
+    p_model text default '', p_android text default ''
 ) returns bigint language plpgsql security definer set search_path = public as $$
 declare
     new_id bigint;
@@ -169,9 +176,11 @@ begin
         end if;
     end if;
 
-    insert into community_comments (kind, target, parent_id, author, author_id, body)
+    insert into community_comments (kind, target, parent_id, author, author_id, body,
+                                   device_model, android_version)
     values (kind, left(p_target, 200), root_id, left(coalesce(p_author, ''), 60),
-            left(coalesce(p_author_id, ''), 60), left(p_body, 1000))
+            left(coalesce(p_author_id, ''), 60), left(p_body, 1000),
+            left(coalesce(p_model, ''), 80), left(coalesce(p_android, ''), 40))
     returning id into new_id;
     return new_id;
 end;
@@ -258,7 +267,7 @@ revoke all on function public.plans_for(text, text, text, integer, integer) from
 revoke all on function public.plan_comment(bigint, text, text) from public;
 revoke all on function public.plan_comments_for(bigint) from public;
 revoke all on function public.comments_for(text, text) from public;
-revoke all on function public.comment_add(text, text, text, text, bigint, text) from public;
+revoke all on function public.comment_add(text, text, text, text, bigint, text, text, text) from public;
 revoke all on function public.comment_delete(bigint, text, text) from public;
 revoke all on function public.comments_by_author(text) from public;
 revoke all on function public.comments_replies_to(text) from public;
@@ -270,7 +279,7 @@ begin
         grant execute on function public.plan_comment(bigint, text, text) to anon;
         grant execute on function public.plan_comments_for(bigint) to anon;
         grant execute on function public.comments_for(text, text) to anon;
-        grant execute on function public.comment_add(text, text, text, text, bigint, text) to anon;
+        grant execute on function public.comment_add(text, text, text, text, bigint, text, text, text) to anon;
         grant execute on function public.comment_delete(bigint, text, text) to anon;
         grant execute on function public.comments_by_author(text) to anon;
         grant execute on function public.comments_replies_to(text) to anon;
@@ -280,7 +289,7 @@ begin
         grant execute on function public.plan_comment(bigint, text, text) to authenticated;
         grant execute on function public.plan_comments_for(bigint) to authenticated;
         grant execute on function public.comments_for(text, text) to authenticated;
-        grant execute on function public.comment_add(text, text, text, text, bigint, text) to authenticated;
+        grant execute on function public.comment_add(text, text, text, text, bigint, text, text, text) to authenticated;
         grant execute on function public.comment_delete(bigint, text, text) to authenticated;
         grant execute on function public.comments_by_author(text) to authenticated;
         grant execute on function public.comments_replies_to(text) to authenticated;
