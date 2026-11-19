@@ -48,6 +48,10 @@ jobs:
 
       # --remote is required: without it the CLI targets a local stack on 127.0.0.1:54322,
       # which is what made every run of this workflow fail before.
+      # --yes is required too: the CLI asks "Apply N migrations?" on a terminal, and in Actions
+      # stdout is not one, so every run printed the prompt and exited 1 without touching the
+      # database. That is why the app kept talking to a schema with no package_votes and no
+      # community_comments: the migrations were committed but never applied.
       - name: Apply migrations
-        run: supabase db push --remote
+        run: supabase db push --remote --yes
         working-directory: server
