@@ -19,6 +19,10 @@
 --
 -- Run after 20261119220000_device_catalog.sql (or use server/supabase/apply-all.sql).
 
+-- The mapping view lives in `private`, out of the API's reach. The schema is not guaranteed to
+-- exist on a deployment that never applied the telemetry migrations, so it is created here first.
+create schema if not exists private;
+
 /** Comment-derived "retail number -> marketing name" pairs, best pair decided by the caller. */
 create or replace view private.model_names as
     select lower(u.model)                        as model,
