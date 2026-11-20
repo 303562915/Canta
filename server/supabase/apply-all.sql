@@ -1474,14 +1474,40 @@ create or replace function public.package_vote_counts(
                and rom_version = coalesce(p_rom_version, 0)
                and (coalesce(p_codename, '') = '' or lower(codename) = lower(p_codename))
            )
+    ), systems as (
+        select case rom
+                   when 'hyperos' then 'HyperOS'
+                   when 'miui' then 'MIUI'
+                   when 'oneui' then 'One UI'
+                   when 'coloros' then 'ColorOS'
+                   when 'realmeui' then 'realme UI'
+                   when 'originos' then 'OriginOS'
+                   when 'funtouch' then 'Funtouch OS'
+                   when 'magicos' then 'MagicOS'
+                   when 'emui' then 'EMUI'
+                   when 'oxygenos' then 'OxygenOS'
+                   when 'nothingos' then 'Nothing OS'
+                   else 'Android'
+               end || case when rom_version > 0 and rom not in ('', 'android')
+                           then ' ' || rom_version else '' end as label,
+               count(*) filter (where can_remove) as yes,
+               count(*) filter (where not can_remove) as no
+        from scoped
+        group by 1
     )
     select jsonb_build_object(
         'yes', (select count(*) from device where can_remove),
         'no', (select count(*) from device where not can_remove),
         'all_yes', (select count(*) from scoped where can_remove),
-        'all_no', (select count(*) from scoped where not can_remove)
+        'all_no', (select count(*) from scoped where not can_remove),
+        'systems', coalesce((
+            select jsonb_object_agg(label, jsonb_build_object('yes', yes, 'no', no))
+            from systems
+        ), '{}'::jsonb)
     )
 $$;
+
+grant execute on function public.package_vote_counts(text, text, text, text, integer) to anon, authenticated;
 
 /** Which side [p_voter] picked for [p_pkg]: true, false, or null when it never voted. */
 create or replace function public.package_my_vote(p_pkg text, p_voter text) returns boolean
