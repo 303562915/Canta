@@ -1452,7 +1452,9 @@ end;
 $$;
 
 /**
- * Counts both sides for [p_pkg], in two scopes: this device and every device.
+ * Counts both sides for [p_pkg], in two scopes: this device and every device, plus the per-system
+ * breakdown of *this model only* — a Redmi K70 page must not offer a Redmi K30 Ultra's MIUI as if
+ * this phone had run it.
  *
  * An empty [p_model] means the caller could not name its phone yet: there is no device scope to
  * report, so that scope is the whole table rather than a zero that reads like "nobody voted".
@@ -1465,15 +1467,19 @@ create or replace function public.package_vote_counts(
         select v.can_remove, v.model, v.codename, v.rom, v.rom_version
         from package_votes v
         where v.pkg = p_pkg
-    ), device as (
-        select can_remove from scoped
+    ), this_model as (
+        -- The breakdown below is about this phone's own builds: votes from other models still
+        -- count in all_yes / all_no, they just do not name a system under this phone.
+        select * from scoped
         where coalesce(p_model, '') = ''
            or (
                lower(model) = lower(coalesce(p_model, ''))
-               and rom = coalesce(p_rom, '')
-               and rom_version = coalesce(p_rom_version, 0)
                and (coalesce(p_codename, '') = '' or lower(codename) = lower(p_codename))
            )
+    ), device as (
+        select can_remove from this_model
+        where coalesce(p_model, '') = ''
+           or (rom = coalesce(p_rom, '') and rom_version = coalesce(p_rom_version, 0))
     ), systems as (
         select case rom
                    when 'hyperos' then 'HyperOS'
@@ -1492,7 +1498,7 @@ create or replace function public.package_vote_counts(
                            then ' ' || rom_version else '' end as label,
                count(*) filter (where can_remove) as yes,
                count(*) filter (where not can_remove) as no
-        from scoped
+        from this_model
         group by 1
     )
     select jsonb_build_object(
