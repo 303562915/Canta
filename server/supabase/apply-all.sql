@@ -2643,3 +2643,238 @@ begin
         grant execute on function public.comments_replies_to(text, text, integer, integer) to authenticated;
     end if;
 end $$;
+
+
+-- ================================================================ 描述修正
+-- Community-corrected descriptions: the bloat list's one line about what an app is, rewritten by
+-- the people who actually run it, and voted on until it can stand in for the published line.
+-- Same content as migrations/20261120150000_description_fixes.sql.
+
+create table if not exists public.description_fixes (
+    id         bigserial primary key,
+    pkg        text not null,
+    body       text not null,
+    note       text not null default '',
+    author     text not null default '',
+    author_id  text not null default '',
+    applied    boolean not null default false,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists description_fixes_pkg_idx
+    on public.description_fixes (pkg, applied desc, created_at desc);
+
+create table if not exists public.description_fix_votes (
+    fix_id     bigint not null references public.description_fixes (id) on delete cascade,
+    voter      text not null,
+    agree      boolean not null,
+    created_at timestamptz not null default now(),
+    primary key (fix_id, voter)
+);
+
+create index if not exists description_fix_votes_fix_idx on public.description_fix_votes (fix_id);
+
+alter table public.description_fixes enable row level security;
+alter table public.description_fix_votes enable row level security;
+
+create or replace function private.description_fix_votes_needed() returns int
+language sql immutable set search_path = ''
+as $$ select 50 $$;
+
+create or replace function private.description_fix_share_needed() returns numeric
+language sql immutable set search_path = ''
+as $$ select 0.80::numeric $$;
+
+create or replace function private.description_fix_settle(p_pkg text)
+returns void language plpgsql security definer set search_path = public as $$
+declare
+    winner bigint;
+begin
+    select t.fix_id into winner
+    from (
+        select f.id as fix_id,
+               f.created_at,
+               count(*) filter (where v.agree) as agrees,
+               count(*) filter (where not v.agree) as disagrees
+        from description_fixes f
+        left join description_fix_votes v on v.fix_id = f.id
+        where f.pkg = p_pkg
+        group by f.id, f.created_at
+    ) t
+    where t.agrees >= private.description_fix_votes_needed()
+      and t.agrees >= private.description_fix_share_needed() * greatest(t.agrees + t.disagrees, 1)
+    order by t.agrees desc, t.created_at asc
+    limit 1;
+
+    update description_fixes
+       set applied = (id = coalesce(winner, -1))
+     where pkg = p_pkg
+       and applied <> (id = coalesce(winner, -1));
+end;
+$$;
+
+create or replace function public.description_fix_add(
+    p_pkg text,
+    p_body text,
+    p_note text default '',
+    p_author text default '',
+    p_author_id text default ''
+) returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+    pkg_text text := left(btrim(coalesce(p_pkg, '')), 200);
+    body_text text := left(btrim(coalesce(p_body, '')), 4000);
+    note_text text := left(btrim(coalesce(p_note, '')), 300);
+    author_text text := left(btrim(coalesce(p_author, '')), 60);
+    author_id_text text := left(btrim(coalesce(p_author_id, '')), 60);
+    existing bigint;
+    new_id bigint;
+begin
+    if pkg_text = '' or body_text = '' then
+        return null;
+    end if;
+
+    if author_id_text <> '' then
+        select f.id into existing
+        from description_fixes f
+        where f.pkg = pkg_text
+          and f.author_id = author_id_text
+          and not f.applied
+        order by f.created_at desc
+        limit 1;
+    end if;
+
+    if existing is not null then
+        update description_fixes
+           set body = body_text,
+               note = note_text,
+               author = author_text,
+               updated_at = now()
+         where id = existing;
+        perform private.description_fix_settle(pkg_text);
+        return jsonb_build_object('id', existing);
+    end if;
+
+    insert into description_fixes (pkg, body, note, author, author_id)
+    values (pkg_text, body_text, note_text, author_text, author_id_text)
+    returning id into new_id;
+
+    perform private.description_fix_settle(pkg_text);
+    return jsonb_build_object('id', new_id);
+end;
+$$;
+
+create or replace function public.description_fix_vote(p_id bigint, p_voter text, p_agree boolean)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare
+    voter_text text := left(btrim(coalesce(p_voter, '')), 60);
+    fix_pkg text;
+    yes_count bigint;
+    no_count bigint;
+    is_applied boolean;
+begin
+    if p_id is null or voter_text = '' then
+        return null;
+    end if;
+
+    select f.pkg into fix_pkg from description_fixes f where f.id = p_id;
+    if not found then
+        return null;
+    end if;
+
+    insert into description_fix_votes (fix_id, voter, agree)
+    values (p_id, voter_text, coalesce(p_agree, true))
+    on conflict (fix_id, voter) do update
+        set agree = excluded.agree,
+            created_at = now();
+
+    perform private.description_fix_settle(fix_pkg);
+
+    select count(*) filter (where agree), count(*) filter (where not agree)
+      into yes_count, no_count
+      from description_fix_votes
+     where fix_id = p_id;
+
+    select applied into is_applied from description_fixes where id = p_id;
+
+    return jsonb_build_object(
+        'agrees', yes_count,
+        'disagrees', no_count,
+        'applied', coalesce(is_applied, false)
+    );
+end;
+$$;
+
+create or replace function public.description_fixes_for(p_pkg text, p_voter text default '')
+returns jsonb language sql stable security definer set search_path = public as $$
+    select coalesce(jsonb_agg(
+        jsonb_build_object(
+            'id', r.id,
+            'body', r.body,
+            'note', r.note,
+            'author', r.author,
+            'author_id', r.author_id,
+            'created_at', r.created_at,
+            'applied', r.applied,
+            'agrees', r.agrees,
+            'disagrees', r.disagrees,
+            'mine', r.mine,
+            'needed', private.description_fix_votes_needed(),
+            'share', private.description_fix_share_needed()
+        )
+        order by r.applied desc, r.agrees desc, r.created_at desc
+    ), '[]'::jsonb)
+    from (
+        select f.id, f.body, f.note, f.author, f.author_id, f.created_at, f.applied,
+               coalesce(v.agrees, 0) as agrees,
+               coalesce(v.disagrees, 0) as disagrees,
+               v.mine
+        from description_fixes f
+        left join lateral (
+            select count(*) filter (where vv.agree) as agrees,
+                   count(*) filter (where not vv.agree) as disagrees,
+                   (array_agg(vv.agree) filter (
+                       where vv.voter = left(coalesce(p_voter, ''), 60)
+                   ))[1] as mine
+            from description_fix_votes vv
+            where vv.fix_id = f.id
+        ) v on true
+        where f.pkg = left(coalesce(p_pkg, ''), 200)
+    ) r
+$$;
+
+create or replace function public.description_fix_current(p_pkg text)
+returns jsonb language sql stable security definer set search_path = public as $$
+    select jsonb_build_object(
+        'id', f.id,
+        'body', f.body,
+        'note', f.note,
+        'author', f.author,
+        'created_at', f.created_at,
+        'agrees', (select count(*) from description_fix_votes v
+                    where v.fix_id = f.id and v.agree),
+        'disagrees', (select count(*) from description_fix_votes v
+                       where v.fix_id = f.id and not v.agree)
+    )
+    from description_fixes f
+    where f.pkg = left(coalesce(p_pkg, ''), 200)
+      and f.applied
+    order by f.created_at desc
+    limit 1
+$$;
+
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        grant execute on function public.description_fix_add(text, text, text, text, text) to anon;
+        grant execute on function public.description_fix_vote(bigint, text, boolean) to anon;
+        grant execute on function public.description_fixes_for(text, text) to anon;
+        grant execute on function public.description_fix_current(text) to anon;
+    end if;
+    if exists (select 1 from pg_roles where rolname = 'authenticated') then
+        grant execute on function public.description_fix_add(text, text, text, text, text) to authenticated;
+        grant execute on function public.description_fix_vote(bigint, text, boolean) to authenticated;
+        grant execute on function public.description_fixes_for(text, text) to authenticated;
+        grant execute on function public.description_fix_current(text) to authenticated;
+    end if;
+end $$;
