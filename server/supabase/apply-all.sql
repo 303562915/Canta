@@ -2097,6 +2097,7 @@ create or replace function public.plan_catalog() returns table (
     with builds as (
         select coalesce(nullif(p.brand, ''), 'unknown') as brand,
                p.model,
+               min(coalesce(p.codename, '')) as codename,
                p.rom,
                p.rom_version,
                count(*)::bigint as plans,
@@ -2106,7 +2107,12 @@ create or replace function public.plan_catalog() returns table (
                       end)::bigint as people
           from plans p
          where coalesce(p.model, '') <> ''
-         group by 1, 2, 3, 4
+         group by 1, 2, 4, 5
+    ), codenames as (
+        -- One codename per model string: the last fallback below needs it, the counts do not.
+        select b.brand, b.model, min(nullif(b.codename, '')) as codename
+          from builds b
+         group by 1, 2
     ), models as (
         select b.brand,
                b.model,
@@ -2124,6 +2130,15 @@ create or replace function public.plan_catalog() returns table (
                      where m.model = lower(b.model)
                      order by m.votes desc
                      limit 1),
+                   -- Still nothing: lend it from another build of the same codename, i.e. the same
+                   -- phone under the ROM's own name for it.
+                   (select coalesce(p4.market_name, '')
+                      from plans p4
+                     where coalesce(cn.codename, '') <> ''
+                       and lower(p4.codename) = lower(cn.codename)
+                       and coalesce(p4.market_name, '') <> ''
+                     order by p4.created_at desc
+                     limit 1),
                    ''
                ) as market_name,
                sum(b.plans)::bigint as model_plans,
@@ -2140,7 +2155,8 @@ create or replace function public.plan_catalog() returns table (
                      where lower(u.model) = lower(b.model)
                 ) ids) as model_people
           from builds b
-         group by b.brand, b.model
+          join codenames cn on cn.brand = b.brand and cn.model = b.model
+         group by b.brand, b.model, cn.codename
     )
     select b.brand, b.model, coalesce(m.market_name, ''), b.rom, b.rom_version,
            b.plans, b.people, m.model_plans, m.model_people
