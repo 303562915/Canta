@@ -2883,7 +2883,7 @@ end $$;
 -- ================================================================ 红点的已读游标
 -- The red dot counts what arrived since the inbox was last opened, not everything that ever
 -- happened: the count takes a cursor the backend itself stamped, and hands the next one back.
--- Same content as migrations/20261120160000_inbox_seen_cursor.sql.
+-- Same content as migrations/20261120165000_inbox_seen_cursor.sql.
 
 -- The signature changes, and `create or replace` cannot add an argument: the old two-argument
 -- function has to go, or both would exist and PostgREST would keep resolving the old one.

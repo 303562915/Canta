@@ -8,7 +8,7 @@
 -- 事后改包名等于换了一份方案，应该重传。同一套身份证明：号码 + 那把秘密，
 -- 光有号码改不动别人的方案。
 --
--- Run after 20261120160000_inbox_seen_cursor.sql (or use server/supabase/apply-all.sql).
+-- Run after 20261120170000_plan_sdk.sql (or use server/supabase/apply-all.sql).
 
 create or replace function public.plan_set_note(p_id bigint, p_owner text, p_token text, p_note text)
 returns boolean

@@ -1,5 +1,10 @@
 -- The red dot's cursor: "what arrived since I last opened the inbox".
 --
+-- Numbered 16500, not 16000: 16000 was already taken by `plans_all`, which reached the remote
+-- first, so two files sharing that version left `supabase db push` stuck on a duplicate
+-- `schema_migrations` key for every migration after it. Nothing in this file depends on the number
+-- — only on `comment_inbox` having run, which 14000 did.
+--
 -- `inbox_summary` counted everything that ever happened to what this identity wrote, so the dot
 -- meant "you have mail" forever: opening the list cleared it on the device, and the very next count
 -- — on the way back to the app list, or after a restart — put the same number back. A message tab
