@@ -54,7 +54,7 @@ jobs:
                      "- 时间：" + $stamp + "\n" +
                      "- 总人数：" + $total + "\n" +
                      "- 有型号：" + $model + "\n\n" +
-                     "cc")
+                     "rr")
             }
           }')
           ANSWER=$(curl -sS --fail-with-body -X POST "$DINGTALK_WEBHOOK" \
