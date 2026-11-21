@@ -52,6 +52,11 @@ jobs:
       # stdout is not one, so every run printed the prompt and exited 1 without touching the
       # database. That is why the app kept talking to a schema with no package_votes and no
       # community_comments: the migrations were committed but never applied.
+      # --include-all is required as well: two people (or two sessions) adding migrations in
+      # parallel produce files whose timestamps fall behind the last applied one, and the CLI
+      # refuses those with "Found local migration files to be inserted before the last migration
+      # on remote database" — exiting 1 with the migration committed but never applied. That is
+      # exactly what happened to 20261121150000_device_name_seed.sql after 170000 landed first.
       - name: Apply migrations
-        run: supabase db push --remote --yes
+        run: supabase db push --remote --yes --include-all
         working-directory: server
